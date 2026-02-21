@@ -1,15 +1,11 @@
 """Interactive CLI chat interface for PicoThink."""
 
-import sys
 import argparse
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import torch
 from tokenizers import Tokenizer
 
-from config import Config
+from pico_think.config import Config
 from pico_think.model import PicoThink
 from pico_think.sleep import sleep_cycle
 

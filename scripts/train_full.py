@@ -1,15 +1,12 @@
 """Train MLA + gating with frozen experts. Loss = CE + balance_loss."""
 
-import sys
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
-from config import Config
+from pico_think.config import Config
 from pico_think.model import PicoThink
 from pico_think.mla import MLA
 from pico_think.dataset import PicoDataset

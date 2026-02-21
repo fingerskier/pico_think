@@ -1,15 +1,12 @@
 """Pre-train encoder + decoder + transformer expert via next-token prediction."""
 
-import sys
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
-from config import Config
+from pico_think.config import Config
 from pico_think.encoder import Encoder
 from pico_think.decoder import Decoder
 from pico_think.experts.transformer_expert import TransformerExpert

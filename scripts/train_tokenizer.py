@@ -1,13 +1,10 @@
 """Train a BPE tokenizer on all JSONL data files."""
 
 import json
-import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
 from tokenizers import Tokenizer, models, trainers, pre_tokenizers, processors
-from config import Config
+from pico_think.config import Config
 
 
 def iter_texts(data_dir: str):

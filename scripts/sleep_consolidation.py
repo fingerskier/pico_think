@@ -1,13 +1,10 @@
 """CLI for running sleep consolidation on the vector store."""
 
-import sys
 import argparse
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
 import torch
-from config import Config
+from pico_think.config import Config
 from pico_think.vector_store import VectorStore
 from pico_think.sleep import sleep_cycle
 

@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68.0", "setuptools-scm>=8.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pico-think"
+version = "0.1.0"
+description = "Embeddable AI model with online training"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.0",
+    "tokenizers>=0.15",
+    "numpy>=1.24",
+    "tqdm>=4.65",
+]
+
+[project.scripts]
+pico-think = "scripts.chat:main"
+pico-think-train-tokenizer = "scripts.train_tokenizer:main"
+pico-think-pretrain-transformer = "scripts.pretrain_transformer:main"
+pico-think-pretrain-diffuser = "scripts.pretrain_diffuser:main"
+pico-think-pretrain-ssm = "scripts.pretrain_state_space:main"
+pico-think-train = "scripts.train_full:main"
+pico-think-sleep = "scripts.sleep_consolidation:main"
+
+[tool.setuptools.packages.find]
+include = ["pico_think*", "scripts*"]
