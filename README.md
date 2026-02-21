@@ -1,2 +1,64 @@
 # pico_think
 Embeddable AI model w/ online training
+
+## Architecture
+
+* Encoder
+* Decoder
+* Multi-Head Latent attention
+* Expert models
+  * Transformer
+    * 128D encoder-decoder
+  * Diffuser
+    * 128D
+  * State-Space
+    * 128D
+* Vector store
+  * 128D
+* Pytorch implementation (GPU)
+
+
+## Functionality
+
+0. Input
+1. Encode
+2. Add a few stored vectors to the context
+3. Encode & attend
+4. Generate output from each module
+   * Transformer
+   * Diffuser
+   * State-Space
+5. Combine expert outputs via weighted sum
+6. Store the vector
+7. Decode and output
+
+* Everything is 128D
+
+
+## Training
+
+* Pre-train the transformer on `./data`
+* Pre-train the diffuser on `./data`
+* Pre-train the state-space model on `./data`
+
+* Then do the whole graph to train just the MLA
+
+
+## Sleep
+
+* Grafting
+  * vectors are randomly sampled
+  * search for highly similar vectors
+  * create a new vectors by fusing the highly similar vectors
+  * discard the original vectors
+* Dreaming
+  * vectors are randomly sampled
+  * search for dissimilar vectors
+  * create a new vector from the fusion of those vectors
+  * retain the sampled vectors
+
+
+## Architecture
+* Python
+* Pytorch
+* CLI chat interface
