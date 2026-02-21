@@ -1,33 +1,29 @@
 """Pre-train diffuser expert: noise prediction MSE loss with frozen encoder."""
 
 import sys
-import math
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import torch
-from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from config import Config
 from pico_think.encoder import Encoder
 from pico_think.experts.diffuser_expert import DiffuserExpert
 from pico_think.dataset import PicoDataset
-
-
-def get_cosine_lr(step, warmup, total, lr):
-    if step < warmup:
-        return lr * step / warmup
-    progress = (step - warmup) / max(1, total - warmup)
-    return lr * 0.5 * (1.0 + math.cos(math.pi * progress))
+from pico_think.training_utils import get_cosine_lr, make_loader, setup_amp, maybe_compile
 
 
 def main():
     cfg = Config()
     cfg.ensure_dirs()
+    cfg.setup_backends()
     device = cfg.get_device()
     print(f"Device: {device}")
+
+    scaler, autocast_ctx = setup_amp(device if cfg.use_amp else "cpu")
+    print(f"Using AMP: {cfg.use_amp and device == 'cuda'}")
 
     # Load pre-trained encoder (frozen)
     ckpt = torch.load(
@@ -48,13 +44,14 @@ def main():
         bos_id=cfg.bos_id, eos_id=cfg.eos_id,
     )
     print(f"  {len(dataset)} chunks")
-    loader = DataLoader(dataset, batch_size=cfg.batch_size, shuffle=True,
-                        drop_last=True, num_workers=0)
+    loader = make_loader(dataset, cfg)
 
     diffuser = DiffuserExpert(
         cfg.d_model, cfg.diff_n_blocks, cfg.diff_n_steps,
         cfg.diff_sample_steps, cfg.diff_dropout,
     ).to(device)
+
+    diffuser = maybe_compile(diffuser, cfg)
 
     optimizer = torch.optim.AdamW(
         diffuser.parameters(), lr=cfg.pretrain_lr, weight_decay=cfg.weight_decay
@@ -68,20 +65,26 @@ def main():
         pbar = tqdm(loader, desc=f"Epoch {epoch}/{cfg.pretrain_epochs}")
 
         for batch in pbar:
-            batch = batch.to(device)
+            batch = batch.to(device, non_blocking=True)
             with torch.no_grad():
                 embeds = encoder(batch)
 
-            loss = diffuser.training_loss(embeds)
+            with autocast_ctx:
+                loss = diffuser.training_loss(embeds)
 
             lr = get_cosine_lr(step, cfg.warmup_steps, total_steps, cfg.pretrain_lr)
             for pg in optimizer.param_groups:
                 pg["lr"] = lr
 
-            optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(diffuser.parameters(), cfg.grad_clip)
-            optimizer.step()
+            scaled_loss = loss / cfg.grad_accum_steps
+            scaler.scale(scaled_loss).backward()
+
+            if (step + 1) % cfg.grad_accum_steps == 0:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(diffuser.parameters(), cfg.grad_clip)
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
 
             epoch_loss += loss.item()
             n_batches += 1

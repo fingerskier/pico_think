@@ -1,14 +1,12 @@
 """Pre-train state-space expert via next-token prediction with frozen encoder."""
 
 import sys
-import math
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from config import Config
@@ -16,20 +14,18 @@ from pico_think.encoder import Encoder
 from pico_think.decoder import Decoder
 from pico_think.experts.state_space_expert import StateSpaceExpert
 from pico_think.dataset import PicoDataset
-
-
-def get_cosine_lr(step, warmup, total, lr):
-    if step < warmup:
-        return lr * step / warmup
-    progress = (step - warmup) / max(1, total - warmup)
-    return lr * 0.5 * (1.0 + math.cos(math.pi * progress))
+from pico_think.training_utils import get_cosine_lr, make_loader, setup_amp, maybe_compile
 
 
 def main():
     cfg = Config()
     cfg.ensure_dirs()
+    cfg.setup_backends()
     device = cfg.get_device()
     print(f"Device: {device}")
+
+    scaler, autocast_ctx = setup_amp(device if cfg.use_amp else "cpu")
+    print(f"Using AMP: {cfg.use_amp and device == 'cuda'}")
 
     # Load pre-trained encoder + decoder (frozen)
     ckpt = torch.load(
@@ -57,13 +53,14 @@ def main():
         bos_id=cfg.bos_id, eos_id=cfg.eos_id,
     )
     print(f"  {len(dataset)} chunks")
-    loader = DataLoader(dataset, batch_size=cfg.batch_size, shuffle=True,
-                        drop_last=True, num_workers=0)
+    loader = make_loader(dataset, cfg)
 
     ssm = StateSpaceExpert(
         cfg.d_model, cfg.ssm_n_layers, cfg.ssm_state_dim,
         cfg.ssm_expand, cfg.ssm_dropout,
     ).to(device)
+
+    ssm = maybe_compile(ssm, cfg)
 
     optimizer = torch.optim.AdamW(
         ssm.parameters(), lr=cfg.pretrain_lr, weight_decay=cfg.weight_decay
@@ -77,31 +74,35 @@ def main():
         pbar = tqdm(loader, desc=f"Epoch {epoch}/{cfg.pretrain_epochs}")
 
         for batch in pbar:
-            batch = batch.to(device)
+            batch = batch.to(device, non_blocking=True)
             input_ids = batch[:, :-1]
             target_ids = batch[:, 1:]
 
             with torch.no_grad():
                 embeds = encoder(input_ids)
 
-            hidden = ssm(embeds)
-
-            logits = decoder(hidden)
-
-            loss = F.cross_entropy(
-                logits.reshape(-1, cfg.vocab_size),
-                target_ids.reshape(-1),
-                ignore_index=cfg.pad_id,
-            )
+            with autocast_ctx:
+                hidden = ssm(embeds)
+                logits = decoder(hidden)
+                loss = F.cross_entropy(
+                    logits.reshape(-1, cfg.vocab_size),
+                    target_ids.reshape(-1),
+                    ignore_index=cfg.pad_id,
+                )
 
             lr = get_cosine_lr(step, cfg.warmup_steps, total_steps, cfg.pretrain_lr)
             for pg in optimizer.param_groups:
                 pg["lr"] = lr
 
-            optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(ssm.parameters(), cfg.grad_clip)
-            optimizer.step()
+            scaled_loss = loss / cfg.grad_accum_steps
+            scaler.scale(scaled_loss).backward()
+
+            if (step + 1) % cfg.grad_accum_steps == 0:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(ssm.parameters(), cfg.grad_clip)
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
 
             epoch_loss += loss.item()
             n_batches += 1

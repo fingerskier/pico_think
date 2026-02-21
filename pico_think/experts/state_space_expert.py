@@ -6,6 +6,26 @@ import torch.nn.functional as F
 import math
 
 
+@torch.jit.script
+def _scan_loop(x: torch.Tensor, dt: torch.Tensor, A_exp: torch.Tensor,
+               B_t: torch.Tensor, C_t: torch.Tensor,
+               d_inner: int, state_dim: int) -> torch.Tensor:
+    """JIT-scripted sequential scan loop for fused element-wise ops."""
+    B_sz, T, _ = x.shape
+    h = torch.zeros(B_sz, d_inner, state_dim, device=x.device, dtype=x.dtype)
+    outputs = torch.empty(B_sz, T, d_inner, device=x.device, dtype=x.dtype)
+
+    for t in range(T):
+        dt_t = dt[:, t]  # (B, d_inner)
+        dA = torch.exp(A_exp * dt_t.unsqueeze(-1))  # (B, d_inner, state_dim)
+        dB = dt_t.unsqueeze(-1) * B_t[:, t].unsqueeze(1)  # (B, d_inner, state_dim)
+        h = dA * h + dB * x[:, t].unsqueeze(-1)
+        y = (h * C_t[:, t].unsqueeze(1)).sum(dim=-1)  # (B, d_inner)
+        outputs[:, t] = y
+
+    return outputs
+
+
 def hippo_init(state_dim: int) -> torch.Tensor:
     """HiPPO-LegS initialization matrix."""
     A = torch.zeros(state_dim, state_dim)
@@ -81,26 +101,11 @@ class MambaBlock(nn.Module):
         C_t = self.s_C(x)  # (B, T, state_dim)
         dt = F.softplus(self.s_dt(x))  # (B, T, d_inner)
 
-        # Discretize A
+        # Pre-compute A (hoisted outside loop, expanded for broadcast)
         A = -torch.exp(self.log_A)  # (d_inner, state_dim)
+        A_exp = A.unsqueeze(0)  # (1, d_inner, state_dim)
 
-        # Sequential scan
-        h = torch.zeros(B, self.d_inner, self.state_dim, device=x.device)
-        outputs = []
-
-        for t in range(T):
-            # dt_t: (B, d_inner)
-            dt_t = dt[:, t]
-            # Discretize: dA = exp(A * dt), dB = dt * B
-            dA = torch.exp(A.unsqueeze(0) * dt_t.unsqueeze(-1))  # (B, d_inner, state_dim)
-            dB = dt_t.unsqueeze(-1) * B_t[:, t].unsqueeze(1)  # (B, d_inner, state_dim)
-            # State update: h = dA * h + dB * x
-            h = dA * h + dB * x[:, t].unsqueeze(-1)
-            # Output: y = C * h
-            y = (h * C_t[:, t].unsqueeze(1)).sum(dim=-1)  # (B, d_inner)
-            outputs.append(y)
-
-        return torch.stack(outputs, dim=1)  # (B, T, d_inner)
+        return _scan_loop(x, dt, A_exp, B_t, C_t, d_inner, self.state_dim)
 
 
 class StateSpaceExpert(nn.Module):

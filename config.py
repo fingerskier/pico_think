@@ -71,6 +71,12 @@ class Config:
     # Device
     device: str = "auto"  # "auto", "cpu", "cuda", "mps"
 
+    # GPU optimization
+    use_amp: bool = True              # automatic mixed precision (fp16)
+    num_workers: int = 2              # DataLoader workers (0 = main thread)
+    use_compile: bool = False         # torch.compile() — opt-in, can be flaky on Windows
+    grad_accum_steps: int = 1         # gradient accumulation (effective batch = batch_size * this)
+
     def get_device(self) -> str:
         if self.device != "auto":
             return self.device
@@ -80,6 +86,14 @@ class Config:
         if torch.backends.mps.is_available():
             return "mps"
         return "cpu"
+
+    def setup_backends(self):
+        """Enable GPU-specific backend optimizations when running on CUDA."""
+        if self.get_device() == "cuda":
+            import torch
+            torch.backends.cudnn.benchmark = True
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
 
     def ensure_dirs(self):
         Path(self.checkpoint_dir).mkdir(exist_ok=True)

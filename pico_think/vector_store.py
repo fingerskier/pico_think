@@ -12,9 +12,13 @@ class VectorStore:
         self.top_k = top_k
         self.vectors = torch.zeros(0, d_model)
         self.write_idx = 0
+        self._norms_dirty = True
+        self._normalized: torch.Tensor | None = None
 
     def to(self, device):
         self.vectors = self.vectors.to(device)
+        self._norms_dirty = True
+        self._normalized = None
         return self
 
     @property
@@ -32,21 +36,32 @@ class VectorStore:
             vecs = vecs.unsqueeze(0)
 
         N = vecs.shape[0]
+        self._norms_dirty = True
+
         if self.count < self.max_vectors:
             space = self.max_vectors - self.count
             if N <= space:
                 self.vectors = torch.cat([self.vectors, vecs], dim=0)
             else:
                 self.vectors = torch.cat([self.vectors, vecs[:space]], dim=0)
-                # FIFO overwrite from beginning
+                # FIFO overwrite from beginning (vectorized)
                 remaining = N - space
-                self.vectors[:remaining] = vecs[space:]
-                self.write_idx = remaining
+                indices = torch.arange(remaining, device=self.vectors.device)
+                write_positions = (self.write_idx + indices) % self.max_vectors
+                self.vectors[write_positions] = vecs[space:]
+                self.write_idx = (self.write_idx + remaining) % self.max_vectors
         else:
-            # FIFO overwrite
-            for i in range(N):
-                self.vectors[self.write_idx % self.max_vectors] = vecs[i]
-                self.write_idx = (self.write_idx + 1) % self.max_vectors
+            # FIFO overwrite (vectorized)
+            indices = torch.arange(N, device=self.vectors.device)
+            write_positions = (self.write_idx + indices) % self.max_vectors
+            self.vectors[write_positions] = vecs
+            self.write_idx = (self.write_idx + N) % self.max_vectors
+
+    def _ensure_normalized(self):
+        """Lazily compute and cache normalized vectors."""
+        if self._norms_dirty or self._normalized is None:
+            self._normalized = F.normalize(self.vectors, dim=-1)
+            self._norms_dirty = False
 
     def search(self, query: torch.Tensor, top_k: int = None) -> torch.Tensor:
         """
@@ -65,10 +80,10 @@ class VectorStore:
         if query.dim() == 2:
             query = query.squeeze(0)
 
-        # Cosine similarity
+        # Cosine similarity with cached norms
         query_norm = F.normalize(query.unsqueeze(0), dim=-1)
-        store_norm = F.normalize(self.vectors, dim=-1)
-        sims = (query_norm @ store_norm.T).squeeze(0)
+        self._ensure_normalized()
+        sims = (query_norm @ self._normalized.T).squeeze(0)
 
         _, indices = sims.topk(top_k)
         return self.vectors[indices]
@@ -84,12 +99,14 @@ class VectorStore:
     def replace(self, indices: torch.Tensor, new_vecs: torch.Tensor):
         """Replace vectors at given indices."""
         self.vectors[indices] = new_vecs.detach()
+        self._norms_dirty = True
 
     def delete(self, indices: torch.Tensor):
         """Delete vectors at indices by moving last vectors into their slots."""
         mask = torch.ones(self.count, dtype=torch.bool, device=self.device)
         mask[indices] = False
         self.vectors = self.vectors[mask]
+        self._norms_dirty = True
 
     def save(self, path: str):
         torch.save({
@@ -107,5 +124,7 @@ class VectorStore:
         self.d_model = data["d_model"]
         self.max_vectors = data["max_vectors"]
         self.top_k = data["top_k"]
+        self._norms_dirty = True
+        self._normalized = None
         if device:
             self.vectors = self.vectors.to(device)

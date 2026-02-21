@@ -3,7 +3,11 @@
     "allow": [
       "Bash(tail:*)",
       "Bash(cd /c/dev/fingerskier/agent/pico_think && source .venv/Scripts/activate && python scripts/train_tokenizer.py 2>&1)",
-      "Bash(cd /c/dev/fingerskier/agent/pico_think && source .venv/Scripts/activate && PYTHONIOENCODING=utf-8 python scripts/pretrain_transformer.py 2>&1)"
+      "Bash(cd /c/dev/fingerskier/agent/pico_think && source .venv/Scripts/activate && PYTHONIOENCODING=utf-8 python scripts/pretrain_transformer.py 2>&1)",
+      "Bash(find:*)",
+      "mcp__plugin_dude_dude__list_projects",
+      "mcp__plugin_dude_dude__upsert_record",
+      "Bash(cd:*)"
     ]
   }
 }

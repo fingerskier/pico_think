@@ -1,34 +1,30 @@
 """Train MLA + gating with frozen experts. Loss = CE + balance_loss."""
 
 import sys
-import math
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from config import Config
 from pico_think.model import PicoThink
 from pico_think.mla import MLA
 from pico_think.dataset import PicoDataset
-
-
-def get_cosine_lr(step, warmup, total, lr):
-    if step < warmup:
-        return lr * step / warmup
-    progress = (step - warmup) / max(1, total - warmup)
-    return lr * 0.5 * (1.0 + math.cos(math.pi * progress))
+from pico_think.training_utils import get_cosine_lr, make_loader, setup_amp, maybe_compile
 
 
 def main():
     cfg = Config()
     cfg.ensure_dirs()
+    cfg.setup_backends()
     device = cfg.get_device()
     print(f"Device: {device}")
+
+    scaler, autocast_ctx = setup_amp(device if cfg.use_amp else "cpu")
+    print(f"Using AMP: {cfg.use_amp and device == 'cuda'}")
 
     print("Loading dataset...")
     dataset = PicoDataset(
@@ -37,8 +33,7 @@ def main():
         bos_id=cfg.bos_id, eos_id=cfg.eos_id,
     )
     print(f"  {len(dataset)} chunks")
-    loader = DataLoader(dataset, batch_size=cfg.batch_size, shuffle=True,
-                        drop_last=True, num_workers=0)
+    loader = make_loader(dataset, cfg)
 
     # Build full model and load pre-trained weights
     model = PicoThink(cfg).to(device)
@@ -53,6 +48,8 @@ def main():
 
     # Freeze experts, train MLA + gate + encoder + decoder
     model.freeze_experts()
+
+    model = maybe_compile(model, cfg)
 
     # Trainable params: MLA + encoder + decoder
     trainable = [p for p in model.parameters() if p.requires_grad]
@@ -71,30 +68,36 @@ def main():
         pbar = tqdm(loader, desc=f"Epoch {epoch}/{cfg.full_train_epochs}")
 
         for batch in pbar:
-            batch = batch.to(device)
+            batch = batch.to(device, non_blocking=True)
             input_ids = batch[:, :-1]
             target_ids = batch[:, 1:]
 
-            out = model(input_ids, use_store=False)  # no store during training
-            logits = out["logits"]
-            gate_weights = out["gate_weights"]
+            with autocast_ctx:
+                out = model(input_ids, use_store=False)
+                logits = out["logits"]
+                gate_weights = out["gate_weights"]
 
-            ce_loss = F.cross_entropy(
-                logits.reshape(-1, cfg.vocab_size),
-                target_ids.reshape(-1),
-                ignore_index=cfg.pad_id,
-            )
-            bal_loss = MLA.balance_loss(gate_weights)
-            loss = ce_loss + cfg.balance_loss_weight * bal_loss
+                ce_loss = F.cross_entropy(
+                    logits.reshape(-1, cfg.vocab_size),
+                    target_ids.reshape(-1),
+                    ignore_index=cfg.pad_id,
+                )
+                bal_loss = MLA.balance_loss(gate_weights)
+                loss = ce_loss + cfg.balance_loss_weight * bal_loss
 
             lr = get_cosine_lr(step, cfg.warmup_steps, total_steps, cfg.full_train_lr)
             for pg in optimizer.param_groups:
                 pg["lr"] = lr
 
-            optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(trainable, cfg.grad_clip)
-            optimizer.step()
+            scaled_loss = loss / cfg.grad_accum_steps
+            scaler.scale(scaled_loss).backward()
+
+            if (step + 1) % cfg.grad_accum_steps == 0:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(trainable, cfg.grad_clip)
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
 
             epoch_loss += loss.item()
             epoch_ce += ce_loss.item()

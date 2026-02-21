@@ -1,14 +1,12 @@
 """Pre-train encoder + decoder + transformer expert via next-token prediction."""
 
 import sys
-import math
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from config import Config
@@ -16,20 +14,18 @@ from pico_think.encoder import Encoder
 from pico_think.decoder import Decoder
 from pico_think.experts.transformer_expert import TransformerExpert
 from pico_think.dataset import PicoDataset
-
-
-def get_cosine_lr(step, warmup, total, lr):
-    if step < warmup:
-        return lr * step / warmup
-    progress = (step - warmup) / max(1, total - warmup)
-    return lr * 0.5 * (1.0 + math.cos(math.pi * progress))
+from pico_think.training_utils import get_cosine_lr, make_loader, setup_amp, maybe_compile
 
 
 def main():
     cfg = Config()
     cfg.ensure_dirs()
+    cfg.setup_backends()
     device = cfg.get_device()
     print(f"Device: {device}")
+
+    scaler, autocast_ctx = setup_amp(device if cfg.use_amp else "cpu")
+    print(f"Using AMP: {cfg.use_amp and device == 'cuda'}")
 
     print("Loading dataset...")
     dataset = PicoDataset(
@@ -39,8 +35,7 @@ def main():
     )
     print(f"  {len(dataset)} chunks")
 
-    loader = DataLoader(dataset, batch_size=cfg.batch_size, shuffle=True,
-                        drop_last=True, num_workers=0)
+    loader = make_loader(dataset, cfg)
 
     encoder = Encoder(cfg.vocab_size, cfg.d_model, cfg.seq_len, cfg.embed_dropout).to(device)
     decoder = Decoder(cfg.d_model, cfg.vocab_size).to(device)
@@ -48,6 +43,10 @@ def main():
     transformer = TransformerExpert(
         cfg.d_model, cfg.tf_n_layers, cfg.tf_n_heads, cfg.tf_ffn_dim, cfg.tf_dropout
     ).to(device)
+
+    encoder = maybe_compile(encoder, cfg)
+    decoder = maybe_compile(decoder, cfg)
+    transformer = maybe_compile(transformer, cfg)
 
     params = list(encoder.parameters()) + list(decoder.parameters()) + list(transformer.parameters())
     optimizer = torch.optim.AdamW(params, lr=cfg.pretrain_lr, weight_decay=cfg.weight_decay)
@@ -61,32 +60,36 @@ def main():
         pbar = tqdm(loader, desc=f"Epoch {epoch}/{cfg.pretrain_epochs}")
 
         for batch in pbar:
-            batch = batch.to(device)
-            # Input: all tokens except last; Target: all tokens except first
+            batch = batch.to(device, non_blocking=True)
             input_ids = batch[:, :-1]
             target_ids = batch[:, 1:]
 
-            # Forward
-            embeds = encoder(input_ids)
-            hidden = transformer(embeds)
-            logits = decoder(hidden)
-
-            # Loss (ignore padding)
-            loss = F.cross_entropy(
-                logits.reshape(-1, cfg.vocab_size),
-                target_ids.reshape(-1),
-                ignore_index=cfg.pad_id,
-            )
+            # Forward with AMP
+            with autocast_ctx:
+                embeds = encoder(input_ids)
+                hidden = transformer(embeds)
+                logits = decoder(hidden)
+                loss = F.cross_entropy(
+                    logits.reshape(-1, cfg.vocab_size),
+                    target_ids.reshape(-1),
+                    ignore_index=cfg.pad_id,
+                )
 
             # Cosine LR
             lr = get_cosine_lr(step, cfg.warmup_steps, total_steps, cfg.pretrain_lr)
             for pg in optimizer.param_groups:
                 pg["lr"] = lr
 
-            optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(params, cfg.grad_clip)
-            optimizer.step()
+            # Gradient accumulation
+            scaled_loss = loss / cfg.grad_accum_steps
+            scaler.scale(scaled_loss).backward()
+
+            if (step + 1) % cfg.grad_accum_steps == 0:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(params, cfg.grad_clip)
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
 
             epoch_loss += loss.item()
             n_batches += 1
