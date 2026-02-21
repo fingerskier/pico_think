@@ -45,12 +45,6 @@ def main():
 
     tokenizer.train_from_iterator(texts, trainer=trainer)
 
-    # Post-processor to add BOS/EOS
-    tokenizer.post_processor = processors.TemplateProcessing(
-        single="<BOS> $A <EOS>",
-        special_tokens=[("<BOS>", cfg.bos_id), ("<EOS>", cfg.eos_id)],
-    )
-
     tokenizer.save(cfg.tokenizer_path)
     print(f"Tokenizer saved to {cfg.tokenizer_path}")
 

@@ -58,8 +58,8 @@ class Config:
 
     # Training
     batch_size: int = 32
-    pretrain_epochs: int = 10
-    full_train_epochs: int = 5
+    pretrain_epochs: int = 1
+    full_train_epochs: int = 1
     pretrain_lr: float = 3e-4
     full_train_lr: float = 1e-4
     weight_decay: float = 0.01

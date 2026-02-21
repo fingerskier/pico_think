@@ -86,8 +86,7 @@ def main():
 
             hidden = ssm(embeds)
 
-            with torch.no_grad():
-                logits = decoder(hidden)
+            logits = decoder(hidden)
 
             loss = F.cross_entropy(
                 logits.reshape(-1, cfg.vocab_size),

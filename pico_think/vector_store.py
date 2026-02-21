@@ -27,7 +27,7 @@ class VectorStore:
 
     def add(self, vecs: torch.Tensor):
         """Add vectors to the store. vecs: (N, d_model)."""
-        vecs = vecs.detach()
+        vecs = vecs.detach().to(self.vectors.device)
         if vecs.dim() == 1:
             vecs = vecs.unsqueeze(0)
 

@@ -134,7 +134,8 @@ class DiffuserExpert(nn.Module):
 
             acp_t = self.alphas_cumprod[t_val]
             # Predict x0
-            x0_pred = (xt - torch.sqrt(1 - acp_t) * pred_noise) / torch.sqrt(acp_t)
+            eps = 1e-8
+            x0_pred = (xt - torch.sqrt(1 - acp_t + eps) * pred_noise) / torch.sqrt(acp_t + eps)
 
             if i < len(timesteps) - 1:
                 t_prev = timesteps[i + 1]
