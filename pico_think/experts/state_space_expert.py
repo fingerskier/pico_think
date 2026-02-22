@@ -6,24 +6,21 @@ import torch.nn.functional as F
 import math
 
 
-@torch.jit.script
-def _scan_loop(x: torch.Tensor, dt: torch.Tensor, A_exp: torch.Tensor,
-               B_t: torch.Tensor, C_t: torch.Tensor,
-               d_inner: int, state_dim: int) -> torch.Tensor:
-    """JIT-scripted sequential scan loop for fused element-wise ops."""
-    B_sz, T, _ = x.shape
-    h = torch.zeros(B_sz, d_inner, state_dim, device=x.device, dtype=x.dtype)
-    outputs = torch.empty(B_sz, T, d_inner, device=x.device, dtype=x.dtype)
+def _parallel_scan(gates, tokens):
+    """Parallel prefix scan: h_t = gates_t * h_{t-1} + tokens_t
 
-    for t in range(T):
-        dt_t = dt[:, t]  # (B, d_inner)
-        dA = torch.exp(A_exp * dt_t.unsqueeze(-1))  # (B, d_inner, state_dim)
-        dB = dt_t.unsqueeze(-1) * B_t[:, t].unsqueeze(1)  # (B, d_inner, state_dim)
-        h = dA * h + dB * x[:, t].unsqueeze(-1)
-        y = (h * C_t[:, t].unsqueeze(1)).sum(dim=-1)  # (B, d_inner)
-        outputs[:, t] = y
-
-    return outputs
+    Uses Hillis-Steele algorithm: O(T log T) work, O(log T) depth.
+    Reduces 255 sequential steps to 8 parallel steps.
+    """
+    T = gates.shape[1]
+    for d in range(int(math.ceil(math.log2(T)))):
+        stride = 2 ** d
+        g_shift = gates[:, stride:]
+        tokens = torch.cat([tokens[:, :stride],
+                            g_shift * tokens[:, :-stride] + tokens[:, stride:]], dim=1)
+        gates = torch.cat([gates[:, :stride],
+                           g_shift * gates[:, :-stride]], dim=1)
+    return tokens
 
 
 def hippo_init(state_dim: int) -> torch.Tensor:
@@ -56,6 +53,8 @@ class MambaBlock(nn.Module):
         self.s_B = nn.Linear(d_inner, state_dim, bias=False)
         self.s_C = nn.Linear(d_inner, state_dim, bias=False)
         self.s_dt = nn.Linear(d_inner, d_inner, bias=True)
+        with torch.no_grad():
+            self.s_dt.bias.uniform_(-4.0, -1.0)  # softplus(-4)≈0.018, softplus(-1)≈0.313
 
         # Discretized A (log-space for stability)
         A = hippo_init(state_dim)
@@ -93,19 +92,33 @@ class MambaBlock(nn.Module):
         return residual + out
 
     def _selective_scan(self, x: torch.Tensor) -> torch.Tensor:
-        """Input-dependent discrete SSM scan."""
-        B, T, d_inner = x.shape
+        """Input-dependent discrete SSM scan with parallel associative scan."""
+        orig_dtype = x.dtype
+        x = x.float()  # force float32 for numerical stability
 
-        # Compute input-dependent parameters
-        B_t = self.s_B(x)  # (B, T, state_dim)
-        C_t = self.s_C(x)  # (B, T, state_dim)
-        dt = F.softplus(self.s_dt(x))  # (B, T, d_inner)
+        B_sz, T, d_inner = x.shape
+        N = self.state_dim
 
-        # Pre-compute A (hoisted outside loop, expanded for broadcast)
-        A = -torch.exp(self.log_A)  # (d_inner, state_dim)
-        A_exp = A.unsqueeze(0)  # (1, d_inner, state_dim)
+        # Compute input-dependent parameters in float32
+        B_t = self.s_B(x)                   # (B, T, N)
+        C_t = self.s_C(x)                   # (B, T, N)
+        dt = F.softplus(self.s_dt(x))       # (B, T, d_inner)
 
-        return _scan_loop(x, dt, A_exp, B_t, C_t, d_inner, self.state_dim)
+        # Discretize A
+        A = -torch.exp(self.log_A.float())  # (d_inner, N)
+        dA = torch.exp(A.unsqueeze(0).unsqueeze(0) * dt.unsqueeze(-1))  # (B, T, d_inner, N)
+
+        # Input contribution: dB * x
+        dBx = (dt.unsqueeze(-1) * B_t.unsqueeze(2) * x.unsqueeze(-1))  # (B, T, d_inner, N)
+
+        # Parallel scan over time dimension
+        # gates = dA: (B, T, d_inner, N), tokens = dBx: (B, T, d_inner, N)
+        h = _parallel_scan(dA, dBx)  # (B, T, d_inner, N)
+
+        # Output: contract state dim with C_t
+        y = (h * C_t.unsqueeze(2)).sum(dim=-1)  # (B, T, d_inner)
+
+        return y.to(orig_dtype)
 
 
 class StateSpaceExpert(nn.Module):

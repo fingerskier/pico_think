@@ -7,7 +7,15 @@
       "Bash(find:*)",
       "mcp__plugin_dude_dude__list_projects",
       "mcp__plugin_dude_dude__upsert_record",
-      "Bash(cd:*)"
+      "Bash(cd:*)",
+      "Bash(cd /c/dev/fingerskier/agent/pico_think && pip install -e . 2>&1)",
+      "Bash(python:*)",
+      "Bash(pip show:*)",
+      "Bash(head:*)",
+      "Bash(ls:*)",
+      "Bash(grep DLL Name:*)",
+      "Bash(pip uninstall:*)",
+      "Bash(pip install:*)"
     ]
   }
 }

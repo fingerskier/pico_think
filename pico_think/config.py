@@ -40,7 +40,7 @@ class Config:
 
     # State-Space expert (Mamba-style)
     ssm_n_layers: int = 4
-    ssm_state_dim: int = 64
+    ssm_state_dim: int = 16
     ssm_expand: int = 2
     ssm_dropout: float = 0.1
 
