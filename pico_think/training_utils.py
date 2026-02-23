@@ -5,7 +5,7 @@ from contextlib import nullcontext
 
 import torch
 from torch.utils.data import DataLoader
-from torch.cuda.amp import GradScaler
+from torch.amp import GradScaler
 
 
 def get_cosine_lr(step, warmup, total, lr):
@@ -33,7 +33,7 @@ def make_loader(dataset, cfg):
 def setup_amp(device):
     """Return (GradScaler, autocast_context) for AMP. No-op on CPU/MPS."""
     if device == "cuda":
-        scaler = GradScaler()
+        scaler = GradScaler("cuda")
         autocast_ctx = torch.autocast("cuda", dtype=torch.float16)
         return scaler, autocast_ctx
     # CPU/MPS: no-op scaler and context
