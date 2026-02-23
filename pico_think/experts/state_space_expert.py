@@ -60,7 +60,7 @@ class MambaBlock(nn.Module):
         A = hippo_init(state_dim)
         # Use diagonal approximation for efficiency
         A_diag = torch.diagonal(A)
-        self.log_A = nn.Parameter(torch.log(-A_diag).unsqueeze(0).expand(d_inner, -1))
+        self.log_A = nn.Parameter(torch.log(-A_diag).unsqueeze(0).expand(d_inner, -1).clone())
 
         # 1D conv for local context
         self.conv = nn.Conv1d(d_inner, d_inner, kernel_size=4, padding=3, groups=d_inner)
